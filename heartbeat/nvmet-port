@@ -41,6 +41,12 @@ OCF_RESKEY_addr_fam_default="ipv4"
 
 OCF_RESKEY_svcid_default="4420"
 : ${OCF_RESKEY_svcid=${OCF_RESKEY_svcid_default}}
+
+OCF_RESKEY_ana_grpid_default="1"
+: ${OCF_RESKEY_ana_grpid=${OCF_RESKEY_ana_grpid_default}}
+
+OCF_RESKEY_ana_state_default=""
+: ${OCF_RESKEY_ana_state=${OCF_RESKEY_ana_state_default}}
 #######################################################################
 meta_data() {
 	cat <<END
@@ -109,6 +115,28 @@ this NVMe-oF-Target port. This list needs to have at least one entry.
 <content type="string"/>
 </parameter>
 
+<parameter name="ana_grpid" required="0" unique="0">
+<longdesc lang="en">
+ANA group, 1 to 128, whose state ana_state sets on this port. Group 1
+always exists; any other group is created on start and removed on stop.
+</longdesc>
+<shortdesc lang="en">ANA group ID</shortdesc>
+<content type="integer" default="${OCF_RESKEY_ana_grpid_default}"/>
+</parameter>
+
+<parameter name="ana_state" required="0" unique="0">
+<longdesc lang="en">
+Asymmetric Namespace Access state of ana_grpid on this port: one of
+'optimized', 'non-optimized', 'inaccessible', 'persistent-loss' or
+'change'. Hosts using NVMe multipath send I/O to the optimized paths
+first. When the same subsystem is exported from several nodes, this is
+how one of them is marked as the path to use. It is applied when the
+port starts. Unset leaves the kernel default, optimized.
+</longdesc>
+<shortdesc lang="en">ANA state</shortdesc>
+<content type="string" default="${OCF_RESKEY_ana_state_default}"/>
+</parameter>
+
 </parameters>
 
 <actions>
@@ -133,10 +161,20 @@ Expects to have a fully populated OCF RA-compliant environment set.
 END
 }
 
+nvmet_port_set_ana() {
+	[ -n "${OCF_RESKEY_ana_state}" ] || return "$OCF_SUCCESS"
+
+	grpdir="${portdir}/ana_groups/${OCF_RESKEY_ana_grpid}"
+	[ -d "${grpdir}" ] || mkdir "${grpdir}" || return "$OCF_ERR_GENERIC"
+	echo "${OCF_RESKEY_ana_state}" > "${grpdir}/ana_state" || return "$OCF_ERR_GENERIC"
+	return "$OCF_SUCCESS"
+}
+
 nvmet_port_start() {
 	nvmet_port_monitor
 	if [ $? =  $OCF_SUCCESS ]; then
-		return $OCF_SUCCESS
+		nvmet_port_set_ana
+		return
 	fi
 
 	mkdir ${portdir}
@@ -144,6 +182,10 @@ nvmet_port_start() {
 	echo ${OCF_RESKEY_type} > ${portdir}/addr_trtype
 	echo ${OCF_RESKEY_svcid} > ${portdir}/addr_trsvcid
 	echo ${OCF_RESKEY_addr_fam} > ${portdir}/addr_adrfam
+
+	# Before the subsystems are linked, so no host sees the port in the
+	# default state first.
+	nvmet_port_set_ana || return "$OCF_ERR_GENERIC"
 
 	for subsystem in ${OCF_RESKEY_nqns}; do
 		ln -s /sys/kernel/config/nvmet/subsystems/${subsystem} \
@@ -162,6 +204,13 @@ nvmet_port_stop() {
 	for subsystem in ${OCF_RESKEY_nqns}; do
 		rm ${portdir}/subsystems/${subsystem}
 	done
+
+	# Group 1 belongs to the port; any other group was made by start and
+	# keeps the port from being removed.
+	if [ "${OCF_RESKEY_ana_grpid}" != 1 ] &&
+	   [ -d "${portdir}/ana_groups/${OCF_RESKEY_ana_grpid}" ]; then
+		rmdir "${portdir}/ana_groups/${OCF_RESKEY_ana_grpid}"
+	fi
 
 	rmdir ${portdir}
 
@@ -189,6 +238,22 @@ nvmet_port_validate() {
 		*)
 			ocf_log err "addr_fam must be ipv4, ipv6, or fc. OCF_RESKEY_addr_fam was set to $OCF_RESKEY_addr_fam"
 			exit $OCF_ERR_ARGS
+			;;
+	esac
+
+	# 128 is NVMET_MAX_ANAGRPS in the kernel's nvmet.h.
+	if ! ocf_is_decimal "${OCF_RESKEY_ana_grpid}" ||
+	   [ "${OCF_RESKEY_ana_grpid}" -lt 1 ] || [ "${OCF_RESKEY_ana_grpid}" -gt 128 ]; then
+		ocf_log err "ana_grpid must be between 1 and 128, got ${OCF_RESKEY_ana_grpid}"
+		exit "$OCF_ERR_CONFIGURED"
+	fi
+
+	case "${OCF_RESKEY_ana_state}" in
+		""|optimized|non-optimized|inaccessible|persistent-loss|change)
+			;;
+		*)
+			ocf_log err "ana_state must be optimized, non-optimized, inaccessible, persistent-loss or change. OCF_RESKEY_ana_state was set to $OCF_RESKEY_ana_state"
+			exit "$OCF_ERR_CONFIGURED"
 			;;
 	esac
 

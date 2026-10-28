@@ -35,6 +35,12 @@ OCF_RESKEY_allowed_initiators_default=""
 
 OCF_RESKEY_serial_default=""
 : ${OCF_RESKEY_serial=${OCF_RESKEY_serial_default}}
+
+OCF_RESKEY_cntlid_min_default=""
+: ${OCF_RESKEY_cntlid_min=${OCF_RESKEY_cntlid_min_default}}
+
+OCF_RESKEY_cntlid_max_default=""
+: ${OCF_RESKEY_cntlid_max=${OCF_RESKEY_cntlid_max_default}}
 #######################################################################
 
 meta_data() {
@@ -84,6 +90,28 @@ to this target</shortdesc>
 <content type="string" default="${OCF_RESKEY_serial_default}"/>
 </parameter>
 
+<parameter name="cntlid_min" required="0" unique="0">
+<longdesc lang="en">
+Lowest controller ID this target hands out for the subsystem, 1 to 65519.
+When the same subsystem is exported from more than one node at a time,
+as with ANA, give each node a range that does not overlap the others:
+the host tells the controllers of a subsystem apart by their IDs.
+Unset leaves the kernel default.
+</longdesc>
+<shortdesc lang="en">Lowest controller ID</shortdesc>
+<content type="integer" default="${OCF_RESKEY_cntlid_min_default}"/>
+</parameter>
+
+<parameter name="cntlid_max" required="0" unique="0">
+<longdesc lang="en">
+Highest controller ID this target hands out for the subsystem, 1 to
+65519, and not below cntlid_min. See cntlid_min.
+Unset leaves the kernel default.
+</longdesc>
+<shortdesc lang="en">Highest controller ID</shortdesc>
+<content type="integer" default="${OCF_RESKEY_cntlid_max_default}"/>
+</parameter>
+
 </parameters>
 
 <actions>
@@ -117,6 +145,10 @@ nvmet_subsystem_start() {
 	local subsys=/sys/kernel/config/nvmet/subsystems/${OCF_RESKEY_nqn}
 	mkdir ${subsys}
 	[ "${OCF_RESKEY_serial}" ] && echo ${OCF_RESKEY_serial} > ${subsys}/attr_serial
+	# The kernel rejects a min above the current max and a max below the
+	# current min.  A new subsystem spans 1..65519, so min goes first.
+	[ "${OCF_RESKEY_cntlid_min}" ] && echo "${OCF_RESKEY_cntlid_min}" > "${subsys}/attr_cntlid_min"
+	[ "${OCF_RESKEY_cntlid_max}" ] && echo "${OCF_RESKEY_cntlid_max}" > "${subsys}/attr_cntlid_max"
 
 	if [ -z "${OCF_RESKEY_allowed_initiators}" ]; then
 		echo 1 > ${subsys}/attr_allow_any_host
@@ -149,6 +181,20 @@ nvmet_subsystem_monitor() {
 }
 
 nvmet_subsystem_validate() {
+	# 65519 is NVME_CNTLID_MAX; IDs above it are reserved.
+	for v in "${OCF_RESKEY_cntlid_min}" "${OCF_RESKEY_cntlid_max}"; do
+		[ -z "$v" ] && continue
+		if ! ocf_is_decimal "$v" || [ "$v" -lt 1 ] || [ "$v" -gt 65519 ]; then
+			ocf_log err "cntlid_min and cntlid_max must be between 1 and 65519, got $v"
+			exit "$OCF_ERR_CONFIGURED"
+		fi
+	done
+	if [ "${OCF_RESKEY_cntlid_min}" ] && [ "${OCF_RESKEY_cntlid_max}" ] &&
+	   [ "${OCF_RESKEY_cntlid_min}" -gt "${OCF_RESKEY_cntlid_max}" ]; then
+		ocf_log err "cntlid_min ${OCF_RESKEY_cntlid_min} is above cntlid_max ${OCF_RESKEY_cntlid_max}"
+		exit "$OCF_ERR_CONFIGURED"
+	fi
+
 	if [ ! -d /sys/kernel/config/nvmet ]; then
 	    ocf_log info "nvmet kernel module not loaded, attempting to load it..."
 	    modprobe nvmet 2>/dev/null
